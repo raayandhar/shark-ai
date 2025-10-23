@@ -80,7 +80,7 @@ def run_profiled_command(
 
     driver_cmd = [driver_path, "--iter", str(iter_count)] + driver_args
 
-    test_output_dir = output_dir / f"line_{test_num}"
+    test_output_dir = output_dir / f"command_{test_num}"
     test_output_dir.mkdir(parents=True, exist_ok=True)
 
     rocprof_cmd = (
