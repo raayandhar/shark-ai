@@ -8,6 +8,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -35,18 +36,18 @@ def parse_rocprof_csv(output_dir: Path) -> TimingStats:
         try:
             with open(csv_file, "r") as f:
                 reader = csv.DictReader(f)
+                # Each row represents a single kernel dispatch
                 for row in reader:
                     if "Start_Timestamp" in row and "End_Timestamp" in row:
-                        try:
-                            start = float(row["Start_Timestamp"])
-                            end = float(row["End_Timestamp"])
-                            duration_us = (end - start) / 1000.0
-                            durations.append(duration_us)
-                        except (ValueError, TypeError):
-                            continue
+                        start = float(row["Start_Timestamp"])
+                        end = float(row["End_Timestamp"])
+                        # Convert from nanoseconds to microseconds
+                        duration_us = (end - start) / 1000.0
+                        durations.append(duration_us)
         except Exception as e:
-            print(f"Warning: Failed to parse {csv_file}: {e}")
-            continue
+            raise RuntimeError(
+                f"Failed to parse rocprof CSV file {csv_file}: {e}"
+            ) from e
 
     if not durations:
         return TimingStats()
@@ -65,11 +66,12 @@ def parse_rocprof_csv(output_dir: Path) -> TimingStats:
 def run_profiled_command(
     command: str,
     driver_path: str,
-    output_dir: Path,
+    output_dir: Path | None,
     iter_count: int,
     rocprof_args: list[str],
     verbose: bool,
-    test_num: int,
+    cmd_num: int,
+    use_tempdir: bool,
 ) -> TimingStats:
 
     driver_args = command.split()
@@ -80,26 +82,32 @@ def run_profiled_command(
 
     driver_cmd = [driver_path, "--iter", str(iter_count)] + driver_args
 
-    test_output_dir = output_dir / f"command_{test_num}"
-    test_output_dir.mkdir(parents=True, exist_ok=True)
-
-    rocprof_cmd = (
-        [
-            "rocprofv3",
-            "--output-format",
-            "csv",
-            "--output-directory",
-            str(test_output_dir),
-        ]
-        + rocprof_args
-        + ["--"]
-        + driver_cmd
-    )
-
-    if verbose:
-        print(f">>> {shlex.join(rocprof_cmd)}\n")
+    # Use either temporary directory or persistent directory
+    if use_tempdir:
+        tmpdir_context = tempfile.TemporaryDirectory()
+        cmd_output_dir = Path(tmpdir_context.__enter__())
+    else:
+        tmpdir_context = None
+        cmd_output_dir = output_dir / f"command_{cmd_num}"
+        cmd_output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        rocprof_cmd = (
+            [
+                "rocprofv3",
+                "--output-format",
+                "csv",
+                "--output-directory",
+                str(cmd_output_dir),
+            ]
+            + rocprof_args
+            + ["--"]
+            + driver_cmd
+        )
+
+        if verbose:
+            print(f">>> {shlex.join(rocprof_cmd)}\n")
+
         result = subprocess.run(
             rocprof_cmd,
             check=True,
@@ -110,7 +118,7 @@ def run_profiled_command(
         if verbose and result.stdout:
             print(result.stdout)
 
-        stats = parse_rocprof_csv(test_output_dir)
+        stats = parse_rocprof_csv(cmd_output_dir)
 
         if verbose:
             print(
@@ -129,6 +137,10 @@ def run_profiled_command(
         if verbose:
             print(f">>> Exception: {e}")
         return TimingStats()
+    finally:
+        # Cleanup temporary directory if used
+        if tmpdir_context is not None:
+            tmpdir_context.__exit__(None, None, None)
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -168,7 +180,7 @@ The script will:
         "--output-dir",
         type=str,
         default="profile_results",
-        help="Directory to store rocprof outputs (default: profile_results/)",
+        help="Directory to store rocprof outputs (default: profile_results/). Ignored if --use-tempdir is set.",
     )
 
     parser.add_argument(
@@ -212,6 +224,12 @@ The script will:
         help="Continue running even if a command fails",
     )
 
+    parser.add_argument(
+        "--use-tempdir",
+        action="store_true",
+        help="Use temporary directories for rocprof outputs (auto-cleanup after parsing)",
+    )
+
     return parser
 
 
@@ -240,16 +258,22 @@ def main():
 
     print(f"Found {len(commands)} commands")
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Setup output directory (only if not using tempdir)
+    output_dir = None
+    if not args.use_tempdir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     rocprof_args = (
         args.rocprof_args.split() if args.rocprof_args else ["--runtime-trace"]
     )
 
     if args.verbose:
-        print(f"Output directory: {output_dir.absolute()}")
         print(f"Rocprof args: {' '.join(rocprof_args)}")
+        if args.use_tempdir:
+            print(f"Using temporary directories (auto-cleanup)")
+        else:
+            print(f"Output directory: {output_dir.absolute()}")
         print(f"Results will be written to: {args.csv}\n")
 
     csv_file = csv.writer(open(args.csv, "w", newline=""))
@@ -278,6 +302,7 @@ def main():
             rocprof_args,
             args.verbose,
             cmd_count,
+            args.use_tempdir,
         )
 
         csv_row = [command]
@@ -301,7 +326,8 @@ def main():
     print(f"Successful: {success_count}")
     print(f"Failed: {failed_count}")
     print(f"Results CSV: {args.csv}")
-    print(f"Rocprof outputs: {output_dir.absolute()}")
+    if not args.use_tempdir:
+        print(f"Rocprof outputs: {output_dir.absolute()}")
     print(f"{'='*80}\n")
 
     return 0 if failed_count == 0 else 1
