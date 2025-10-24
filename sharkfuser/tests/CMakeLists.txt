@@ -320,3 +320,13 @@ add_fusilli_lit_test(
     iree-opt
     iree-compile
 )
+
+add_test(
+  NAME batch_profile_tests
+  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test_batch_profile.sh
+  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(batch_profile_tests PROPERTIES
+  LABELS "batch_profile"
+  TIMEOUT 300
+)
