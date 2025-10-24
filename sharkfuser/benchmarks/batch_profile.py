@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright 2025 Advanced Micro Devices, Inc.
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 import argparse
 import csv
@@ -179,8 +184,8 @@ The script will:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="profile_results",
-        help="Directory to store rocprof outputs (default: profile_results/). Ignored if --use-tempdir is set.",
+        default=None,
+        help="Directory to store rocprof outputs. If not provided, uses temporary directories with auto-cleanup.",
     )
 
     parser.add_argument(
@@ -207,15 +212,7 @@ The script will:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        default=None,
         help="Print detailed output",
-    )
-
-    parser.add_argument(
-        "--no-verbose",
-        action="store_false",
-        dest="verbose",
-        help="Disable detailed output",
     )
 
     parser.add_argument(
@@ -224,21 +221,12 @@ The script will:
         help="Continue running even if a command fails",
     )
 
-    parser.add_argument(
-        "--use-tempdir",
-        action="store_true",
-        help="Use temporary directories for rocprof outputs (auto-cleanup after parsing)",
-    )
-
     return parser
 
 
 def main():
     parser = get_parser()
     args = parser.parse_args()
-
-    if args.verbose is None:
-        args.verbose = args.csv is None
 
     commands_file = Path(args.commands_file)
     if not commands_file.exists():
@@ -258,9 +246,10 @@ def main():
 
     print(f"Found {len(commands)} commands")
 
-    # Setup output directory (only if not using tempdir)
+    # Use tempdir by default unless output_dir is explicitly provided
+    use_tempdir = args.output_dir is None
     output_dir = None
-    if not args.use_tempdir:
+    if not use_tempdir:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -270,7 +259,7 @@ def main():
 
     if args.verbose:
         print(f"Rocprof args: {' '.join(rocprof_args)}")
-        if args.use_tempdir:
+        if use_tempdir:
             print(f"Using temporary directories (auto-cleanup)")
         else:
             print(f"Output directory: {output_dir.absolute()}")
@@ -302,7 +291,7 @@ def main():
             rocprof_args,
             args.verbose,
             cmd_count,
-            args.use_tempdir,
+            use_tempdir,
         )
 
         csv_row = [command]
@@ -326,7 +315,7 @@ def main():
     print(f"Successful: {success_count}")
     print(f"Failed: {failed_count}")
     print(f"Results CSV: {args.csv}")
-    if not args.use_tempdir:
+    if not use_tempdir:
         print(f"Rocprof outputs: {output_dir.absolute()}")
     print(f"{'='*80}\n")
 
