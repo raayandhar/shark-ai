@@ -72,7 +72,6 @@ def run_profiled_command(
     command: str,
     driver_path: str,
     output_dir: Path | None,
-    iter_count: int,
     rocprof_args: list[str],
     verbose: bool,
     cmd_num: int,
@@ -85,7 +84,7 @@ def run_profiled_command(
             print(f">>> Failed to parse command: {command}")
         return TimingStats()
 
-    driver_cmd = [driver_path, "--iter", str(iter_count)] + driver_args
+    driver_cmd = [driver_path] + driver_args
 
     # Use either temporary directory or persistent directory
     if use_tempdir:
@@ -177,8 +176,8 @@ The script will:
     parser.add_argument(
         "--csv",
         type=str,
-        default="profile_results.csv",
-        help="Output CSV file for aggregated results (default: profile_results.csv)",
+        default="benchmark_results.csv",
+        help="Output CSV file for aggregated results (default: benchmark_results.csv)",
     )
 
     parser.add_argument(
@@ -191,15 +190,8 @@ The script will:
     parser.add_argument(
         "--driver",
         type=str,
-        default="build/bin/benchmarks/fusilli_benchmark_driver",
+        required=True,
         help="Path to fusilli_benchmark_driver binary",
-    )
-
-    parser.add_argument(
-        "--iter",
-        type=int,
-        default=10,
-        help="Number of iterations for each benchmark (default: 10)",
     )
 
     parser.add_argument(
@@ -287,7 +279,6 @@ def main():
             command,
             args.driver,
             output_dir,
-            args.iter,
             rocprof_args,
             args.verbose,
             cmd_count,

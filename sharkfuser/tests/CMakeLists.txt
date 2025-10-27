@@ -322,11 +322,13 @@ add_fusilli_lit_test(
 )
 
 add_test(
-  NAME batch_profile_tests
-  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test_batch_profile.sh
+  NAME run_benchmark_tests
+  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test_run_benchmark.sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/run_benchmark.py
+          ${CMAKE_BINARY_DIR}/bin/benchmarks/fusilli_benchmark_driver
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(batch_profile_tests PROPERTIES
-  LABELS "batch_profile"
+set_tests_properties(run_benchmark_tests PROPERTIES
+  LABELS "run_benchmark"
   TIMEOUT 300
 )

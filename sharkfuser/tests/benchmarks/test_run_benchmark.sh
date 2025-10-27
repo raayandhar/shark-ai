@@ -1,21 +1,17 @@
 #!/bin/bash
 set -e
 
+# Arguments from CMake
+RUN_BENCHMARK="$1"
+DRIVER="$2"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_COMMANDS="${SCRIPT_DIR}/test_commands.txt"
-# We are running from the build directory (where ctest runs)
-BATCH_PROFILE="${SCRIPT_DIR}/../../benchmarks/batch_profile.py"
-DRIVER="bin/benchmarks/fusilli_benchmark_driver"
-OUTPUT_CSV="test_batch_profile_out.csv"
-
-# Any artifacts from a previous test
-rm -f "${OUTPUT_CSV}"
-python3 "${BATCH_PROFILE}" \
+OUTPUT_CSV=$(mktemp)
+python3 "${RUN_BENCHMARK}" \
   --commands-file "${TEST_COMMANDS}" \
   --csv "${OUTPUT_CSV}" \
-  --driver "${DRIVER}" \
-  --use-tempdir \
-  --iter 10
+  --driver "${DRIVER}"
 
 if [ ! -f "${OUTPUT_CSV}" ]; then
   echo "ERROR: Output CSV not created"
@@ -38,6 +34,6 @@ if ! tail -n +2 "${OUTPUT_CSV}" | cut -d',' -f6 | grep -q "10"; then
   echo "ERROR: Expected count=10 not found"
   exit 1
 fi
-# There's a better way to indicate that the test has passed? Outside of just timeout in the CMake file?
+
 echo "PASSED: batch_profile test"
 rm -f "${OUTPUT_CSV}"
