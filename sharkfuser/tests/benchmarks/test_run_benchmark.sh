@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+set -x
 
 # Arguments from CMake
 RUN_BENCHMARK="$1"
@@ -11,8 +12,8 @@ OUTPUT_CSV=$(mktemp)
 python3 "${RUN_BENCHMARK}" \
   --commands-file "${TEST_COMMANDS}" \
   --csv "${OUTPUT_CSV}" \
-  --driver "${DRIVER}"
-
+  --driver "${DRIVER}" \
+  --verbose
 if [ ! -f "${OUTPUT_CSV}" ]; then
   echo "ERROR: Output CSV not created"
   exit 1
