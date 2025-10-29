@@ -321,14 +321,16 @@ add_fusilli_lit_test(
     iree-compile
 )
 
-add_test(
-  NAME run_benchmark_tests
-  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test_run_benchmark.sh
-          ${CMAKE_SOURCE_DIR}/benchmarks/run_benchmark.py
-          ${CMAKE_BINARY_DIR}/bin/benchmarks/fusilli_benchmark_driver
-  WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(run_benchmark_tests PROPERTIES
-  LABELS "run_benchmark"
-  TIMEOUT 300
-)
+if(FUSILLI_SYSTEMS_AMDGPU)
+  add_test(
+    NAME run_benchmark_tests
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/test_run_benchmark.sh
+            ${CMAKE_SOURCE_DIR}/benchmarks/run_benchmark.py
+            ${CMAKE_BINARY_DIR}/bin/benchmarks/fusilli_benchmark_driver
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+  )
+  set_tests_properties(run_benchmark_tests PROPERTIES
+    LABELS "run_benchmark"
+    TIMEOUT 300
+  )
+endif()

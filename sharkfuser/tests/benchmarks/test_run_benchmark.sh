@@ -38,3 +38,5 @@ fi
 
 echo "PASSED: batch_profile test"
 rm -f "${OUTPUT_CSV}"
+
+exit 1
