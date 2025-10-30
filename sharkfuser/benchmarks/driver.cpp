@@ -143,7 +143,7 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   FUSILLI_CHECK_ERROR(graph->validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/true));
+  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/false));
 
   // Allocate input, weight and output buffers.
   auto xBuf = FUSILLI_TRY(allocateBufferOfType(handle, xT, convIOType, 1.0f));
@@ -170,7 +170,253 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   return ok();
 }
 
-static int benchmark(int argc, char **argv) {
+static ErrorObject
+benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
+                   int64_t g, int64_t k, int64_t z, int64_t y, int64_t x,
+                   int64_t t, int64_t u, int64_t v, int64_t o, int64_t p,
+                   int64_t q, int64_t m, int64_t l, int64_t j,
+                   std::string_view imageLayout, std::string_view outputLayout,
+                   std::string_view filterLayout, int64_t s, int64_t iter,
+                   DataType convIOType) {
+#ifdef FUSILLI_ENABLE_AMDGPU
+  Handle handle = FUSILLI_TRY(Handle::create(Backend::AMDGPU));
+#else
+  Handle handle = FUSILLI_TRY(Handle::create(Backend::CPU));
+#endif
+
+  // Calculate filter channels
+  auto fc = c / g;
+
+  // Calculate output dimensions (DY shape) - same as forward pass output
+  auto oh = (h + 2 * p - l * (y - 1) - 1) / u + 1;
+  auto ow = (w + 2 * q - j * (x - 1) - 1) / v + 1;
+  auto od = (s == 3) ? ((d + 2 * o - m * (z - 1) - 1) / t + 1) : 0;
+
+  // Build attributes based on 2D/3D conv and layouts.
+  auto xDims = (s == 2) ? std::vector<int64_t>{n, c, h, w}
+                        : std::vector<int64_t>{n, c, d, h, w};
+  auto dyDims = (s == 2) ? std::vector<int64_t>{n, k, oh, ow}
+                         : std::vector<int64_t>{n, k, od, oh, ow};
+  auto wDims = (s == 2) ? std::vector<int64_t>{k, fc, y, x}
+                        : std::vector<int64_t>{k, fc, z, y, x};
+  auto xStride =
+      (s == 2)
+          ? (imageLayout == "NCHW"
+                 ? std::vector<int64_t>{c * h * w, h * w, w, 1}
+                 : std::vector<int64_t>{c * h * w, 1, c * w, c})
+          : (imageLayout == "NCDHW"
+                 ? std::vector<int64_t>{c * d * h * w, d * h * w, h * w, w, 1}
+                 : std::vector<int64_t>{c * d * h * w, 1, c * h * w, w * c, c});
+  auto dyStride =
+      (s == 2) ? (outputLayout == "NCHW"
+                      ? std::vector<int64_t>{k * oh * ow, oh * ow, ow, 1}
+                      : std::vector<int64_t>{k * oh * ow, 1, k * ow, k})
+               : (outputLayout == "NCDHW"
+                      ? std::vector<int64_t>{k * od * oh * ow, od * oh * ow,
+                                             oh * ow, ow, 1}
+                      : std::vector<int64_t>{k * od * oh * ow, 1, k * oh * ow,
+                                             ow * k, k});
+  auto wStride =
+      (s == 2)
+          ? (filterLayout == "NCHW"
+                 ? std::vector<int64_t>{fc * y * x, y * x, x, 1}
+                 : std::vector<int64_t>{fc * y * x, 1, x * fc, fc})
+          : (filterLayout == "NCDHW"
+                 ? std::vector<int64_t>{fc * z * y * x, z * y * x, y * x, x, 1}
+                 : std::vector<int64_t>{fc * z * y * x, 1, y * x * fc, x * fc,
+                                        fc});
+  auto convStride =
+      (s == 2) ? std::vector<int64_t>{u, v} : std::vector<int64_t>{t, u, v};
+  auto convPadding =
+      (s == 2) ? std::vector<int64_t>{p, q} : std::vector<int64_t>{o, p, q};
+  auto convDilation =
+      (s == 2) ? std::vector<int64_t>{l, j} : std::vector<int64_t>{m, l, j};
+
+  // Build graph for the given handle (device), validate and compile it.
+  auto graph = std::make_shared<Graph>();
+
+  // Set unique name to prevent concurrent invocations from polluting cache.
+  auto graphName =
+      std::format("benchmark_conv_wgrad_n{}_c{}_d{}_h{}_w{}_g{}_k{"
+                  "}_z{}_y{}_x{}_t{}_u{}_v{}_o{}"
+                  "_p{}_q{}_m{}_l{}_j{}_S{}_I{}_O{}_F{}",
+                  n, c, d, h, w, g, k, z, y, x, t, u, v, o, p, q, m, l, j, s,
+                  imageLayout, outputLayout, filterLayout);
+  graph->setName(graphName);
+
+  graph->setIODataType(DataType::Float)
+      .setComputeDataType(DataType::Float)
+      .setIntermediateDataType(DataType::Float);
+
+  auto dyT = graph->tensor(
+      TensorAttr().setName("dy").setDim(dyDims).setStride(dyStride).setDataType(
+          convIOType));
+
+  auto xT = graph->tensor(TensorAttr()
+                              .setName("input")
+                              .setDim(xDims)
+                              .setStride(xStride)
+                              .setDataType(convIOType));
+
+  auto convAttr = ConvWGradAttr()
+                      .setStride(convStride)
+                      .setPadding(convPadding)
+                      .setDilation(convDilation)
+                      .setName("conv_wgrad");
+
+  auto dwT = graph->convWGrad(dyT, xT, convAttr);
+  dwT->setDim(wDims).setStride(wStride).setOutput(true).setDataType(convIOType);
+
+  // Validate, infer missing properties
+  FUSILLI_CHECK_ERROR(graph->validate());
+
+  // Compile
+  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/false));
+
+  // Allocate buffers.
+  auto dyBuf = FUSILLI_TRY(allocateBufferOfType(handle, dyT, convIOType, 1.0f));
+  auto xBuf = FUSILLI_TRY(allocateBufferOfType(handle, xT, convIOType, 1.0f));
+  auto dwBuf = FUSILLI_TRY(allocateBufferOfType(handle, dwT, convIOType, 0.0f));
+
+  // Create variant pack.
+  std::unordered_map<std::shared_ptr<TensorAttr>, std::shared_ptr<Buffer>>
+      variantPack = {
+          {dyT, dyBuf},
+          {xT, xBuf},
+          {dwT, dwBuf},
+      };
+
+  // Execute graph a few times.
+  for (size_t i = 0; i < iter; i++)
+    FUSILLI_CHECK_ERROR(graph->execute(handle, variantPack));
+
+  return ok();
+}
+
+static ErrorObject
+benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
+                   int64_t g, int64_t k, int64_t z, int64_t y, int64_t x,
+                   int64_t t, int64_t u, int64_t v, int64_t o, int64_t p,
+                   int64_t q, int64_t m, int64_t l, int64_t j,
+                   std::string_view imageLayout, std::string_view outputLayout,
+                   std::string_view filterLayout, int64_t s, int64_t iter,
+                   DataType convIOType) {
+#ifdef FUSILLI_ENABLE_AMDGPU
+  Handle handle = FUSILLI_TRY(Handle::create(Backend::AMDGPU));
+#else
+  Handle handle = FUSILLI_TRY(Handle::create(Backend::CPU));
+#endif
+
+  // Calculate filter channels
+  auto fc = c / g;
+
+  // Calculate output dimensions (DY shape) - same as forward pass output
+  auto oh = (h + 2 * p - l * (y - 1) - 1) / u + 1;
+  auto ow = (w + 2 * q - j * (x - 1) - 1) / v + 1;
+  auto od = (s == 3) ? ((d + 2 * o - m * (z - 1) - 1) / t + 1) : 0;
+
+  // Build attributes based on 2D/3D conv and layouts.
+  auto xDims = (s == 2) ? std::vector<int64_t>{n, c, h, w}
+                        : std::vector<int64_t>{n, c, d, h, w};
+  auto dyDims = (s == 2) ? std::vector<int64_t>{n, k, oh, ow}
+                         : std::vector<int64_t>{n, k, od, oh, ow};
+  auto wDims = (s == 2) ? std::vector<int64_t>{k, fc, y, x}
+                        : std::vector<int64_t>{k, fc, z, y, x};
+  auto xStride =
+      (s == 2)
+          ? (imageLayout == "NCHW"
+                 ? std::vector<int64_t>{c * h * w, h * w, w, 1}
+                 : std::vector<int64_t>{c * h * w, 1, c * w, c})
+          : (imageLayout == "NCDHW"
+                 ? std::vector<int64_t>{c * d * h * w, d * h * w, h * w, w, 1}
+                 : std::vector<int64_t>{c * d * h * w, 1, c * h * w, w * c, c});
+  auto dyStride =
+      (s == 2) ? (outputLayout == "NCHW"
+                      ? std::vector<int64_t>{k * oh * ow, oh * ow, ow, 1}
+                      : std::vector<int64_t>{k * oh * ow, 1, k * ow, k})
+               : (outputLayout == "NCDHW"
+                      ? std::vector<int64_t>{k * od * oh * ow, od * oh * ow,
+                                             oh * ow, ow, 1}
+                      : std::vector<int64_t>{k * od * oh * ow, 1, k * oh * ow,
+                                             ow * k, k});
+  auto wStride =
+      (s == 2)
+          ? (filterLayout == "NCHW"
+                 ? std::vector<int64_t>{fc * y * x, y * x, x, 1}
+                 : std::vector<int64_t>{fc * y * x, 1, x * fc, fc})
+          : (filterLayout == "NCDHW"
+                 ? std::vector<int64_t>{fc * z * y * x, z * y * x, y * x, x, 1}
+                 : std::vector<int64_t>{fc * z * y * x, 1, y * x * fc, x * fc,
+                                        fc});
+  auto convStride =
+      (s == 2) ? std::vector<int64_t>{u, v} : std::vector<int64_t>{t, u, v};
+  auto convPadding =
+      (s == 2) ? std::vector<int64_t>{p, q} : std::vector<int64_t>{o, p, q};
+  auto convDilation =
+      (s == 2) ? std::vector<int64_t>{l, j} : std::vector<int64_t>{m, l, j};
+
+  // Build graph for the given handle (device), validate and compile it.
+  auto graph = std::make_shared<Graph>();
+
+  // Set unique name to prevent concurrent invocations from polluting cache.
+  auto graphName =
+      std::format("benchmark_conv_dgrad_n{}_c{}_d{}_h{}_w{}_g{}_k{"
+                  "}_z{}_y{}_x{}_t{}_u{}_v{}_o{}"
+                  "_p{}_q{}_m{}_l{}_j{}_S{}_I{}_O{}_F{}",
+                  n, c, d, h, w, g, k, z, y, x, t, u, v, o, p, q, m, l, j, s,
+                  imageLayout, outputLayout, filterLayout);
+  graph->setName(graphName);
+
+  graph->setIODataType(DataType::Float)
+      .setComputeDataType(DataType::Float)
+      .setIntermediateDataType(DataType::Float);
+
+  auto dyT = graph->tensor(
+      TensorAttr().setName("dy").setDim(dyDims).setStride(dyStride).setDataType(
+          convIOType));
+
+  auto wT = graph->tensor(TensorAttr()
+                              .setName("filter")
+                              .setDim(wDims)
+                              .setStride(wStride)
+                              .setDataType(convIOType));
+
+  auto convAttr = ConvDGradAttr()
+                      .setStride(convStride)
+                      .setPadding(convPadding)
+                      .setDilation(convDilation)
+                      .setName("conv_dgrad");
+
+  auto dxT = graph->convDGrad(dyT, wT, convAttr);
+  dxT->setDim(xDims).setStride(xStride).setOutput(true).setDataType(convIOType);
+
+  // Validate, infer missing properties
+  FUSILLI_CHECK_ERROR(graph->validate());
+
+  // Compile
+  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/false));
+
+  // Allocate buffers.
+  auto dyBuf = FUSILLI_TRY(allocateBufferOfType(handle, dyT, convIOType, 1.0f));
+  auto wBuf = FUSILLI_TRY(allocateBufferOfType(handle, wT, convIOType, 1.0f));
+  auto dxBuf = FUSILLI_TRY(allocateBufferOfType(handle, dxT, convIOType, 0.0f));
+
+  // Create variant pack.
+  std::unordered_map<std::shared_ptr<TensorAttr>, std::shared_ptr<Buffer>>
+      variantPack = {
+          {dyT, dyBuf},
+          {wT, wBuf},
+          {dxT, dxBuf},
+      };
+
+  // Execute graph a few times.
+  for (size_t i = 0; i < iter; i++)
+    FUSILLI_CHECK_ERROR(graph->execute(handle, variantPack));
+
+  return ok();
+}
+
+int benchmark(int argc, char **argv) {
   CLI::App mainApp{"Fusilli Benchmark Driver"};
   mainApp.require_subcommand(1);
 
@@ -182,11 +428,17 @@ static int benchmark(int argc, char **argv) {
   // Conv flags are kept in sync with MIOpen's ConvDriver:
   // https://github.com/ROCm/rocm-libraries/blob/db0544fb61f2c7bd5a86dce98d4963420c1c741a/projects/miopen/driver/conv_driver.hpp#L878
   CLI::App *convApp =
-      mainApp.add_subcommand("conv", "Fusilli Benchmark Forward Convolution");
+      mainApp.add_subcommand("conv", "Fusilli Benchmark Convolution");
 
   // CLI Options:
   int64_t n, c, d, h, w, g, k, z, y, x, t, u, v, o, p, q, m, l, j, s;
+  int64_t mode;
   std::string imageLayout, filterLayout, outputLayout;
+  convApp
+      ->add_option("--mode,-F", mode,
+                   "Conv mode: 1=forward, 2=weight_grad, 4=data_grad")
+      ->required()
+      ->check(CLI::IsMember({1, 2, 4}));
   convApp->add_option("--batchsize,-n", n, "Input batch size")
       ->required()
       ->check(kIsPositiveInteger);
@@ -265,48 +517,56 @@ static int benchmark(int argc, char **argv) {
   auto *f2 = convApp->add_flag("--bf16", bf16, "Run bf16 convolution");
   // Can't specify both flags.
   f1->excludes(f2);
-  convApp->add_flag("--bias,-b", bias, "Run with bias");
+  convApp->add_flag("--bias,-b", bias, "Run with bias (only for mode=0)");
 
   CLI11_PARSE(mainApp, argc, argv);
-
-  // Additional validation of convApp options (apart from default CLI checks)
-  if (s == 2) {
-    // Reject 3D layouts for 2D conv
-    if (imageLayout.size() != 4 || filterLayout.size() != 4 ||
-        outputLayout.size() != 4) {
-      std::cerr << "Detected at least one invalid {input, filter, output} "
-                   "layout for 2D convolution."
-                << std::endl;
-      return 1;
-    }
-  }
-  if (s == 3) {
-    // Reject 2D layouts for 3D conv
-    if (imageLayout.size() != 5 || filterLayout.size() != 5 ||
-        outputLayout.size() != 5) {
-      std::cerr << "Detected at least one invalid {input, filter, output} "
-                   "layout for 3D convolution."
-                << std::endl;
-      return 1;
-    }
-    // Reject default (sentinel) values for optional args in 3D conv
-    if (d == -1 || z == -1 || t == -1 || o == -1 || m == -1) {
-      std::cerr << "Detected at least one of {in_d, fil_d, conv_stride_d, "
-                   "pad_d, dilation_d} that was not set for 3D convolution."
-                << std::endl;
-      return 1;
-    }
-  }
-
-  // Validation of group count
-  if (c % g != 0 || k % g != 0) {
-    std::cerr << "Detected invalid group count." << std::endl;
-    return 1;
-  }
 
   std::cout << "Fusilli Benchmark started..." << std::endl;
 
   if (convApp->parsed()) {
+    // Additional validation of convApp options (apart from default CLI checks)
+    if (s == 2) {
+      // Reject 3D layouts for 2D conv
+      if (imageLayout.size() != 4 || filterLayout.size() != 4 ||
+          outputLayout.size() != 4) {
+        std::cerr << "Detected at least one invalid {input, filter, output} "
+                     "layout for 2D convolution."
+                  << std::endl;
+        return 1;
+      }
+    }
+    if (s == 3) {
+      // Reject 2D layouts for 3D conv
+      if (imageLayout.size() != 5 || filterLayout.size() != 5 ||
+          outputLayout.size() != 5) {
+        std::cerr << "Detected at least one invalid {input, filter, output} "
+                     "layout for 3D convolution."
+                  << std::endl;
+        return 1;
+      }
+      // Reject default (sentinel) values for optional args in 3D conv
+      if (d == -1 || z == -1 || t == -1 || o == -1 || m == -1) {
+        std::cerr << "Detected at least one of {in_d, fil_d, conv_stride_d, "
+                     "pad_d, dilation_d} that was not set for 3D convolution."
+                  << std::endl;
+        return 1;
+      }
+    }
+
+    // Validation of group count
+    if (c % g != 0 || k % g != 0) {
+      std::cerr << "Detected invalid group count." << std::endl;
+      return 1;
+    }
+
+    // Validate bias flag only works with forward mode
+    if (bias && mode != 1) {
+      std::cerr << "Bias flag (--bias) is only supported for forward "
+                   "convolution (mode=1)."
+                << std::endl;
+      return 1;
+    }
+
     DataType convIOType;
     if (fp16)
       convIOType = DataType::Half;
@@ -316,9 +576,24 @@ static int benchmark(int argc, char **argv) {
       // When unspecified, default to fp32 conv.
       convIOType = DataType::Float;
 
-    auto status = benchmarkConvFprop(n, c, d, h, w, g, k, z, y, x, t, u, v, o,
-                                     p, q, m, l, j, imageLayout, outputLayout,
-                                     filterLayout, s, bias, iter, convIOType);
+    ErrorObject status = ok();
+    if (mode == 1) {
+      // Forward convolution
+      status = benchmarkConvFprop(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
+                                  q, m, l, j, imageLayout, outputLayout,
+                                  filterLayout, s, bias, iter, convIOType);
+    } else if (mode == 2) {
+      // Weight gradient
+      status = benchmarkConvWGrad(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
+                                  q, m, l, j, imageLayout, outputLayout,
+                                  filterLayout, s, iter, convIOType);
+    } else if (mode == 4) {
+      // Data gradient
+      status = benchmarkConvDGrad(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
+                                  q, m, l, j, imageLayout, outputLayout,
+                                  filterLayout, s, iter, convIOType);
+    }
+
     if (isError(status)) {
       std::cerr << "Fusilli Benchmark failed: " << status << std::endl;
       return 1;
