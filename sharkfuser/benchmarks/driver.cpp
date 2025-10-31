@@ -436,7 +436,7 @@ int benchmark(int argc, char **argv) {
   std::string imageLayout, filterLayout, outputLayout;
   convApp
       ->add_option("--mode,-F", mode,
-                   "Conv mode: 1=forward, 2=weight_grad, 4=data_grad")
+                   "Conv mode: 1=forward, 2=data_grad, 4=weight_grad")
       ->required()
       ->check(CLI::IsMember({1, 2, 4}));
   convApp->add_option("--batchsize,-n", n, "Input batch size")
@@ -583,13 +583,13 @@ int benchmark(int argc, char **argv) {
                                   q, m, l, j, imageLayout, outputLayout,
                                   filterLayout, s, bias, iter, convIOType);
     } else if (mode == 2) {
-      // Weight gradient
-      status = benchmarkConvWGrad(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
+      // Data gradient
+      status = benchmarkConvDGrad(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
                                   q, m, l, j, imageLayout, outputLayout,
                                   filterLayout, s, iter, convIOType);
     } else if (mode == 4) {
-      // Data gradient
-      status = benchmarkConvDGrad(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
+      // Weight gradient
+      status = benchmarkConvWGrad(n, c, d, h, w, g, k, z, y, x, t, u, v, o, p,
                                   q, m, l, j, imageLayout, outputLayout,
                                   filterLayout, s, iter, convIOType);
     }
