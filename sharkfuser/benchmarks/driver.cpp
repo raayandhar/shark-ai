@@ -143,7 +143,7 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   FUSILLI_CHECK_ERROR(graph->validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/false));
+  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/true));
 
   // Allocate input, weight and output buffers.
   auto xBuf = FUSILLI_TRY(allocateBufferOfType(handle, xT, convIOType, 1.0f));
@@ -416,7 +416,7 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   return ok();
 }
 
-int benchmark(int argc, char **argv) {
+static int benchmark(int argc, char **argv) {
   CLI::App mainApp{"Fusilli Benchmark Driver"};
   mainApp.require_subcommand(1);
 
@@ -517,7 +517,7 @@ int benchmark(int argc, char **argv) {
   auto *f2 = convApp->add_flag("--bf16", bf16, "Run bf16 convolution");
   // Can't specify both flags.
   f1->excludes(f2);
-  convApp->add_flag("--bias,-b", bias, "Run with bias (only for mode=0)");
+  convApp->add_flag("--bias,-b", bias, "Run with bias (only for mode=1)");
 
   CLI11_PARSE(mainApp, argc, argv);
 
