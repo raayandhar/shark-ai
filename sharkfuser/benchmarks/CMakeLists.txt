@@ -58,7 +58,7 @@ add_fusilli_benchmark(
   NAME fusilli_benchmark_conv2d_nhwc_fp16_bias
   DRIVER fusilli_benchmark_driver
   ARGS
-    --iter 10 conv -F 1 --fp16 -n 16 -c 48 -H 48 -W 32 -k 48 -y 3 -x 3 -p 2 -q 2 -u 1 -v 1 -l 2 -j 2 --in_layout "NHWC" --out_layout "NHWC" --fil_layout "NHWC" --spatial_dim 2 --bias
+    --iter 10 conv -F 1 --fp16 -n 16 -c 48 -H 48 -W 32 -k 48 -y 3 -x 3 -p 2 -q 2 -u 1 -v 1 -l 1 -j 1 --in_layout "NHWC" --out_layout "NHWC" --fil_layout "NHWC" --spatial_dim 2 --bias
 )
 
 # Weight Gradient benchmarks (mode=4)
@@ -80,7 +80,7 @@ add_fusilli_benchmark(
   NAME fusilli_benchmark_conv2d_wgrad_nchw_bf16
   DRIVER fusilli_benchmark_driver
   ARGS
-    --iter 10 conv -F 4 --bf16 -n 100 -c 3 -H 32 -W 32 -k 32 -y 3 -x 3 -u 1 -v 1 -p 0 -q 0 -l 1 -j 1 --in_layout "NCHW" --fil_layout "NCHW" --out_layout "NCHW" --spatial_dim 2
+    --iter 10 conv -F 4 --bf16 -n 64 -c 3 -H 32 -W 32 -k 32 -y 3 -x 3 -u 1 -v 1 -p 0 -q 0 -l 1 -j 1 --in_layout "NCHW" --fil_layout "NCHW" --out_layout "NCHW" --spatial_dim 2
 )
 
 add_fusilli_benchmark(

@@ -85,7 +85,7 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                                          : std::vector<int64_t>{k, 1, k, k, k});
 
   // Build graph for the given handle (device), validate and compile it.
-  auto graph = std::make_shared<Graph>();
+  Graph graph;
 
   // Set unique name to prevent concurrent invocations of the benchmark driver
   // from polluting the same cache files leading to race conditions.
@@ -95,27 +95,27 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                   "_p{}_q{}_m{}_l{}_j{}_S{}_I{}_O{}_F{}_bias{}",
                   n, c, d, h, w, g, k, z, y, x, t, u, v, o, p, q, m, l, j, s,
                   imageLayout, outputLayout, filterLayout, bias);
-  graph->setName(graphName);
+  graph.setName(graphName);
 
   // Types on the graph are kept at fp32 but we explicitly set
   // individual tensor types below based on configuration. These
   // types hence don't matter much and are used only to infer
   // missing type annotations on tensors.
-  graph->setIODataType(DataType::Float)
+  graph.setIODataType(DataType::Float)
       .setComputeDataType(DataType::Float)
       .setIntermediateDataType(DataType::Float);
 
-  auto xT = graph->tensor(TensorAttr()
-                              .setName("input")
-                              .setDim(xDims)
-                              .setStride(xStride)
-                              .setDataType(convIOType));
+  auto xT = graph.tensor(TensorAttr()
+                             .setName("input")
+                             .setDim(xDims)
+                             .setStride(xStride)
+                             .setDataType(convIOType));
 
-  auto wT = graph->tensor(TensorAttr()
-                              .setName("filter")
-                              .setDim(wDims)
-                              .setStride(wStride)
-                              .setDataType(convIOType));
+  auto wT = graph.tensor(TensorAttr()
+                             .setName("filter")
+                             .setDim(wDims)
+                             .setStride(wStride)
+                             .setDataType(convIOType));
 
   auto convAttr = ConvFPropAttr()
                       .setStride(convStride)
@@ -123,27 +123,27 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                       .setDilation(convDilation)
                       .setName("conv_fprop");
 
-  auto yT = graph->convFProp(xT, wT, convAttr);
+  auto yT = graph.convFProp(xT, wT, convAttr);
   yT->setDataType(convIOType);
 
   std::shared_ptr<TensorAttr> bT;
   if (bias) {
-    bT = graph->tensor(TensorAttr()
-                           .setName("bias")
-                           .setDim(biasDims)
-                           .setStride(biasStride)
-                           .setDataType(convIOType));
+    bT = graph.tensor(TensorAttr()
+                          .setName("bias")
+                          .setDim(biasDims)
+                          .setStride(biasStride)
+                          .setDataType(convIOType));
     auto biasAttr = PointwiseAttr().setMode(PointwiseAttr::Mode::ADD);
-    yT = graph->pointwise(yT, bT, biasAttr);
+    yT = graph.pointwise(yT, bT, biasAttr);
     yT->setDataType(convIOType);
   }
   yT->setOutput(true).setDataType(convIOType);
 
   // Validate, infer missing properties
-  FUSILLI_CHECK_ERROR(graph->validate());
+  FUSILLI_CHECK_ERROR(graph.validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/true));
+  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/true));
 
   // Allocate input, weight and output buffers.
   auto xBuf = FUSILLI_TRY(allocateBufferOfType(handle, xT, convIOType, 1.0f));
@@ -165,7 +165,7 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
 
   // Execute graph a few times.
   for (size_t i = 0; i < iter; i++)
-    FUSILLI_CHECK_ERROR(graph->execute(handle, variantPack));
+    FUSILLI_CHECK_ERROR(graph.execute(handle, variantPack));
 
   return ok();
 }
@@ -187,44 +187,11 @@ benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   // Calculate filter channels
   auto fc = c / g;
 
-  // Calculate output dimensions (DY shape) - same as forward pass output
-  auto oh = (h + 2 * p - l * (y - 1) - 1) / u + 1;
-  auto ow = (w + 2 * q - j * (x - 1) - 1) / v + 1;
-  auto od = (s == 3) ? ((d + 2 * o - m * (z - 1) - 1) / t + 1) : 0;
-
   // Build attributes based on 2D/3D conv and layouts.
   auto xDims = (s == 2) ? std::vector<int64_t>{n, c, h, w}
                         : std::vector<int64_t>{n, c, d, h, w};
-  auto dyDims = (s == 2) ? std::vector<int64_t>{n, k, oh, ow}
-                         : std::vector<int64_t>{n, k, od, oh, ow};
   auto wDims = (s == 2) ? std::vector<int64_t>{k, fc, y, x}
                         : std::vector<int64_t>{k, fc, z, y, x};
-  auto xStride =
-      (s == 2)
-          ? (imageLayout == "NCHW"
-                 ? std::vector<int64_t>{c * h * w, h * w, w, 1}
-                 : std::vector<int64_t>{c * h * w, 1, c * w, c})
-          : (imageLayout == "NCDHW"
-                 ? std::vector<int64_t>{c * d * h * w, d * h * w, h * w, w, 1}
-                 : std::vector<int64_t>{c * d * h * w, 1, c * h * w, w * c, c});
-  auto dyStride =
-      (s == 2) ? (outputLayout == "NCHW"
-                      ? std::vector<int64_t>{k * oh * ow, oh * ow, ow, 1}
-                      : std::vector<int64_t>{k * oh * ow, 1, k * ow, k})
-               : (outputLayout == "NCDHW"
-                      ? std::vector<int64_t>{k * od * oh * ow, od * oh * ow,
-                                             oh * ow, ow, 1}
-                      : std::vector<int64_t>{k * od * oh * ow, 1, k * oh * ow,
-                                             ow * k, k});
-  auto wStride =
-      (s == 2)
-          ? (filterLayout == "NCHW"
-                 ? std::vector<int64_t>{fc * y * x, y * x, x, 1}
-                 : std::vector<int64_t>{fc * y * x, 1, x * fc, fc})
-          : (filterLayout == "NCDHW"
-                 ? std::vector<int64_t>{fc * z * y * x, z * y * x, y * x, x, 1}
-                 : std::vector<int64_t>{fc * z * y * x, 1, y * x * fc, x * fc,
-                                        fc});
   auto convStride =
       (s == 2) ? std::vector<int64_t>{u, v} : std::vector<int64_t>{t, u, v};
   auto convPadding =
@@ -232,8 +199,28 @@ benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   auto convDilation =
       (s == 2) ? std::vector<int64_t>{l, j} : std::vector<int64_t>{m, l, j};
 
+  // Calculate output dimensions (DY shape) using the same inference as forward
+  auto dyDims = getConvInferredOutputShape(xDims, wDims, convDilation,
+                                           convPadding, convStride);
+
+  auto xStride =
+      (imageLayout == "NCHW" || imageLayout == "NCDHW")
+          ? generateStrideFromDim(xDims, getContiguousStrideOrder(xDims.size()))
+          : generateStrideFromDim(xDims,
+                                  getChannelsLastStrideOrder(xDims.size()));
+  auto dyStride = (outputLayout == "NCHW" || outputLayout == "NCDHW")
+                      ? generateStrideFromDim(
+                            dyDims, getContiguousStrideOrder(dyDims.size()))
+                      : generateStrideFromDim(
+                            dyDims, getChannelsLastStrideOrder(dyDims.size()));
+  auto wStride =
+      (filterLayout == "NCHW" || filterLayout == "NCDHW")
+          ? generateStrideFromDim(wDims, getContiguousStrideOrder(wDims.size()))
+          : generateStrideFromDim(wDims,
+                                  getChannelsLastStrideOrder(wDims.size()));
+
   // Build graph for the given handle (device), validate and compile it.
-  auto graph = std::make_shared<Graph>();
+  Graph graph;
 
   // Set unique name to prevent concurrent invocations from polluting cache.
   auto graphName =
@@ -242,21 +229,21 @@ benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                   "_p{}_q{}_m{}_l{}_j{}_S{}_I{}_O{}_F{}",
                   n, c, d, h, w, g, k, z, y, x, t, u, v, o, p, q, m, l, j, s,
                   imageLayout, outputLayout, filterLayout);
-  graph->setName(graphName);
+  graph.setName(graphName);
 
-  graph->setIODataType(DataType::Float)
+  graph.setIODataType(DataType::Float)
       .setComputeDataType(DataType::Float)
       .setIntermediateDataType(DataType::Float);
 
-  auto dyT = graph->tensor(
+  auto dyT = graph.tensor(
       TensorAttr().setName("dy").setDim(dyDims).setStride(dyStride).setDataType(
           convIOType));
 
-  auto xT = graph->tensor(TensorAttr()
-                              .setName("input")
-                              .setDim(xDims)
-                              .setStride(xStride)
-                              .setDataType(convIOType));
+  auto xT = graph.tensor(TensorAttr()
+                             .setName("input")
+                             .setDim(xDims)
+                             .setStride(xStride)
+                             .setDataType(convIOType));
 
   auto convAttr = ConvWGradAttr()
                       .setStride(convStride)
@@ -264,14 +251,14 @@ benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                       .setDilation(convDilation)
                       .setName("conv_wgrad");
 
-  auto dwT = graph->convWGrad(dyT, xT, convAttr);
+  auto dwT = graph.convWGrad(dyT, xT, convAttr);
   dwT->setDim(wDims).setStride(wStride).setOutput(true).setDataType(convIOType);
 
   // Validate, infer missing properties
-  FUSILLI_CHECK_ERROR(graph->validate());
+  FUSILLI_CHECK_ERROR(graph.validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/false));
+  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/false));
 
   // Allocate buffers.
   auto dyBuf = FUSILLI_TRY(allocateBufferOfType(handle, dyT, convIOType, 1.0f));
@@ -288,7 +275,7 @@ benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
 
   // Execute graph a few times.
   for (size_t i = 0; i < iter; i++)
-    FUSILLI_CHECK_ERROR(graph->execute(handle, variantPack));
+    FUSILLI_CHECK_ERROR(graph.execute(handle, variantPack));
 
   return ok();
 }
@@ -310,44 +297,11 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   // Calculate filter channels
   auto fc = c / g;
 
-  // Calculate output dimensions (DY shape) - same as forward pass output
-  auto oh = (h + 2 * p - l * (y - 1) - 1) / u + 1;
-  auto ow = (w + 2 * q - j * (x - 1) - 1) / v + 1;
-  auto od = (s == 3) ? ((d + 2 * o - m * (z - 1) - 1) / t + 1) : 0;
-
   // Build attributes based on 2D/3D conv and layouts.
   auto xDims = (s == 2) ? std::vector<int64_t>{n, c, h, w}
                         : std::vector<int64_t>{n, c, d, h, w};
-  auto dyDims = (s == 2) ? std::vector<int64_t>{n, k, oh, ow}
-                         : std::vector<int64_t>{n, k, od, oh, ow};
   auto wDims = (s == 2) ? std::vector<int64_t>{k, fc, y, x}
                         : std::vector<int64_t>{k, fc, z, y, x};
-  auto xStride =
-      (s == 2)
-          ? (imageLayout == "NCHW"
-                 ? std::vector<int64_t>{c * h * w, h * w, w, 1}
-                 : std::vector<int64_t>{c * h * w, 1, c * w, c})
-          : (imageLayout == "NCDHW"
-                 ? std::vector<int64_t>{c * d * h * w, d * h * w, h * w, w, 1}
-                 : std::vector<int64_t>{c * d * h * w, 1, c * h * w, w * c, c});
-  auto dyStride =
-      (s == 2) ? (outputLayout == "NCHW"
-                      ? std::vector<int64_t>{k * oh * ow, oh * ow, ow, 1}
-                      : std::vector<int64_t>{k * oh * ow, 1, k * ow, k})
-               : (outputLayout == "NCDHW"
-                      ? std::vector<int64_t>{k * od * oh * ow, od * oh * ow,
-                                             oh * ow, ow, 1}
-                      : std::vector<int64_t>{k * od * oh * ow, 1, k * oh * ow,
-                                             ow * k, k});
-  auto wStride =
-      (s == 2)
-          ? (filterLayout == "NCHW"
-                 ? std::vector<int64_t>{fc * y * x, y * x, x, 1}
-                 : std::vector<int64_t>{fc * y * x, 1, x * fc, fc})
-          : (filterLayout == "NCDHW"
-                 ? std::vector<int64_t>{fc * z * y * x, z * y * x, y * x, x, 1}
-                 : std::vector<int64_t>{fc * z * y * x, 1, y * x * fc, x * fc,
-                                        fc});
   auto convStride =
       (s == 2) ? std::vector<int64_t>{u, v} : std::vector<int64_t>{t, u, v};
   auto convPadding =
@@ -355,8 +309,28 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   auto convDilation =
       (s == 2) ? std::vector<int64_t>{l, j} : std::vector<int64_t>{m, l, j};
 
+  // Calculate output dimensions (DY shape) using the same inference as forward
+  auto dyDims = getConvInferredOutputShape(xDims, wDims, convDilation,
+                                           convPadding, convStride);
+
+  auto xStride =
+      (imageLayout == "NCHW" || imageLayout == "NCDHW")
+          ? generateStrideFromDim(xDims, getContiguousStrideOrder(xDims.size()))
+          : generateStrideFromDim(xDims,
+                                  getChannelsLastStrideOrder(xDims.size()));
+  auto dyStride = (outputLayout == "NCHW" || outputLayout == "NCDHW")
+                      ? generateStrideFromDim(
+                            dyDims, getContiguousStrideOrder(dyDims.size()))
+                      : generateStrideFromDim(
+                            dyDims, getChannelsLastStrideOrder(dyDims.size()));
+  auto wStride =
+      (filterLayout == "NCHW" || filterLayout == "NCDHW")
+          ? generateStrideFromDim(wDims, getContiguousStrideOrder(wDims.size()))
+          : generateStrideFromDim(wDims,
+                                  getChannelsLastStrideOrder(wDims.size()));
+
   // Build graph for the given handle (device), validate and compile it.
-  auto graph = std::make_shared<Graph>();
+  Graph graph;
 
   // Set unique name to prevent concurrent invocations from polluting cache.
   auto graphName =
@@ -365,21 +339,21 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                   "_p{}_q{}_m{}_l{}_j{}_S{}_I{}_O{}_F{}",
                   n, c, d, h, w, g, k, z, y, x, t, u, v, o, p, q, m, l, j, s,
                   imageLayout, outputLayout, filterLayout);
-  graph->setName(graphName);
+  graph.setName(graphName);
 
-  graph->setIODataType(DataType::Float)
+  graph.setIODataType(DataType::Float)
       .setComputeDataType(DataType::Float)
       .setIntermediateDataType(DataType::Float);
 
-  auto dyT = graph->tensor(
+  auto dyT = graph.tensor(
       TensorAttr().setName("dy").setDim(dyDims).setStride(dyStride).setDataType(
           convIOType));
 
-  auto wT = graph->tensor(TensorAttr()
-                              .setName("filter")
-                              .setDim(wDims)
-                              .setStride(wStride)
-                              .setDataType(convIOType));
+  auto wT = graph.tensor(TensorAttr()
+                             .setName("filter")
+                             .setDim(wDims)
+                             .setStride(wStride)
+                             .setDataType(convIOType));
 
   auto convAttr = ConvDGradAttr()
                       .setStride(convStride)
@@ -387,14 +361,14 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                       .setDilation(convDilation)
                       .setName("conv_dgrad");
 
-  auto dxT = graph->convDGrad(dyT, wT, convAttr);
+  auto dxT = graph.convDGrad(dyT, wT, convAttr);
   dxT->setDim(xDims).setStride(xStride).setOutput(true).setDataType(convIOType);
 
   // Validate, infer missing properties
-  FUSILLI_CHECK_ERROR(graph->validate());
+  FUSILLI_CHECK_ERROR(graph.validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph->compile(handle, /*remove=*/false));
+  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/false));
 
   // Allocate buffers.
   auto dyBuf = FUSILLI_TRY(allocateBufferOfType(handle, dyT, convIOType, 1.0f));
@@ -411,7 +385,7 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
 
   // Execute graph a few times.
   for (size_t i = 0; i < iter; i++)
-    FUSILLI_CHECK_ERROR(graph->execute(handle, variantPack));
+    FUSILLI_CHECK_ERROR(graph.execute(handle, variantPack));
 
   return ok();
 }
