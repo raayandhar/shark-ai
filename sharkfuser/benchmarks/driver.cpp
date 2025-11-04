@@ -54,22 +54,15 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   auto wDims = (s == 2) ? std::vector<int64_t>{k, fc, y, x}
                         : std::vector<int64_t>{k, fc, z, y, x};
   auto xStride =
-      (s == 2)
-          ? (imageLayout == "NCHW"
-                 ? std::vector<int64_t>{c * h * w, h * w, w, 1}
-                 : std::vector<int64_t>{c * h * w, 1, c * w, c})
-          : (imageLayout == "NCDHW"
-                 ? std::vector<int64_t>{c * d * h * w, d * h * w, h * w, w, 1}
-                 : std::vector<int64_t>{c * d * h * w, 1, c * h * w, w * c, c});
+      (imageLayout == "NCHW" || imageLayout == "NCDHW")
+          ? generateStrideFromDim(xDims, getContiguousStrideOrder(xDims.size()))
+          : generateStrideFromDim(xDims,
+                                  getChannelsLastStrideOrder(xDims.size()));
   auto wStride =
-      (s == 2)
-          ? (filterLayout == "NCHW"
-                 ? std::vector<int64_t>{fc * y * x, y * x, x, 1}
-                 : std::vector<int64_t>{fc * y * x, 1, x * fc, fc})
-          : (filterLayout == "NCDHW"
-                 ? std::vector<int64_t>{fc * z * y * x, z * y * x, y * x, x, 1}
-                 : std::vector<int64_t>{fc * z * y * x, 1, y * x * fc, x * fc,
-                                        fc});
+      (filterLayout == "NCHW" || filterLayout == "NCDHW")
+          ? generateStrideFromDim(wDims, getContiguousStrideOrder(wDims.size()))
+          : generateStrideFromDim(wDims,
+                                  getChannelsLastStrideOrder(wDims.size()));
   auto convStride =
       (s == 2) ? std::vector<int64_t>{u, v} : std::vector<int64_t>{t, u, v};
   auto convPadding =
@@ -79,10 +72,11 @@ benchmarkConvFprop(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
   auto biasDims = (s == 2) ? std::vector<int64_t>{1, k, 1, 1}
                            : std::vector<int64_t>{1, k, 1, 1, 1};
   auto biasStride =
-      (s == 2) ? (imageLayout == "NCHW" ? std::vector<int64_t>{k, 1, 1, 1}
-                                        : std::vector<int64_t>{k, 1, k, k})
-               : (imageLayout == "NCDHW" ? std::vector<int64_t>{k, 1, 1, 1, 1}
-                                         : std::vector<int64_t>{k, 1, k, k, k});
+      (imageLayout == "NCHW" || imageLayout == "NCDHW")
+          ? generateStrideFromDim(biasDims,
+                                  getContiguousStrideOrder(biasDims.size()))
+          : generateStrideFromDim(biasDims,
+                                  getChannelsLastStrideOrder(biasDims.size()));
 
   // Build graph for the given handle (device), validate and compile it.
   Graph graph;
@@ -252,13 +246,13 @@ benchmarkConvWGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                       .setName("conv_wgrad");
 
   auto dwT = graph.convWGrad(dyT, xT, convAttr);
-  dwT->setDim(wDims).setStride(wStride).setOutput(true).setDataType(convIOType);
+  dwT->setDim(wDims).setOutput(true).setDataType(convIOType);
 
   // Validate, infer missing properties
   FUSILLI_CHECK_ERROR(graph.validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/false));
+  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/true));
 
   // Allocate buffers.
   auto dyBuf = FUSILLI_TRY(allocateBufferOfType(handle, dyT, convIOType, 1.0f));
@@ -362,13 +356,13 @@ benchmarkConvDGrad(int64_t n, int64_t c, int64_t d, int64_t h, int64_t w,
                       .setName("conv_dgrad");
 
   auto dxT = graph.convDGrad(dyT, wT, convAttr);
-  dxT->setDim(xDims).setStride(xStride).setOutput(true).setDataType(convIOType);
+  dxT->setDim(xDims).setOutput(true).setDataType(convIOType);
 
   // Validate, infer missing properties
   FUSILLI_CHECK_ERROR(graph.validate());
 
   // Compile
-  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/false));
+  FUSILLI_CHECK_ERROR(graph.compile(handle, /*remove=*/true));
 
   // Allocate buffers.
   auto dyBuf = FUSILLI_TRY(allocateBufferOfType(handle, dyT, convIOType, 1.0f));
