@@ -29,7 +29,7 @@ class TimingStats(NamedTuple):
 ALL_STATS = ["min", "max", "mean", "stddev", "count"]
 
 
-def parse_rocprof_csv(output_dir: Path) -> TimingStats:
+def parse_rocprof_csv(output_dir: Path, iter_count: int) -> TimingStats:
     kernel_trace_files = list(output_dir.rglob("*kernel_trace.csv"))
 
     if not kernel_trace_files:
@@ -57,11 +57,34 @@ def parse_rocprof_csv(output_dir: Path) -> TimingStats:
     if not durations:
         return TimingStats()
 
-    min_time = min(durations)
-    max_time = max(durations)
-    mean_time = statistics.mean(durations)
-    stddev = statistics.stdev(durations) if len(durations) > 1 else 0.0
-    count = len(durations)
+    # Group dispatches by iteration
+    # Total dispatches / iter_count = dispatches per iteration
+    total_dispatches = len(durations)
+
+    if iter_count > 0 and total_dispatches >= iter_count:
+        dispatches_per_iter = total_dispatches // iter_count
+        # Group consecutive dispatches into iterations and sum their durations
+        iteration_durations = []
+        for i in range(iter_count):
+            start_idx = i * dispatches_per_iter
+            end_idx = start_idx + dispatches_per_iter
+            iter_sum = sum(durations[start_idx:end_idx])
+            iteration_durations.append(iter_sum)
+
+        # Compute statistics across iterations
+        min_time = min(iteration_durations)
+        max_time = max(iteration_durations)
+        mean_time = statistics.mean(iteration_durations)
+        stddev = (
+            statistics.stdev(iteration_durations)
+            if len(iteration_durations) > 1
+            else 0.0
+        )
+        count = len(iteration_durations)
+    else:
+        raise RuntimeError(
+            f">>> DEBUG: Invalid iter_count: {iter_count} or total_dispatches: {total_dispatches} < iter_count."
+        )
 
     return TimingStats(
         min=min_time, max=max_time, mean=mean_time, stddev=stddev, count=count
@@ -83,6 +106,12 @@ def run_profiled_command(
         if verbose:
             print(f">>> Failed to parse command: {command}")
         return TimingStats()
+
+    iter_count = 1
+    if "--iter" in driver_args:
+        iter_idx = driver_args.index("--iter")
+        if iter_idx + 1 < len(driver_args):
+            iter_count = int(driver_args[iter_idx + 1])
 
     driver_cmd = [driver_path] + driver_args
 
@@ -122,7 +151,7 @@ def run_profiled_command(
         if verbose and result.stdout:
             print(result.stdout)
 
-        stats = parse_rocprof_csv(cmd_output_dir)
+        stats = parse_rocprof_csv(cmd_output_dir, iter_count)
 
         if verbose:
             print(
@@ -168,6 +197,7 @@ The script will:
 
     parser.add_argument(
         "--commands-file",
+        "-f",
         type=str,
         required=True,
         help="File containing benchmark commands (one per line)",
@@ -175,6 +205,7 @@ The script will:
 
     parser.add_argument(
         "--csv",
+        "-o",
         type=str,
         default="benchmark_results.csv",
         help="Output CSV file for aggregated results (default: benchmark_results.csv)",
@@ -182,20 +213,27 @@ The script will:
 
     parser.add_argument(
         "--output-dir",
+        "-d",
         type=str,
         default=None,
         help="Directory to store rocprof outputs. If not provided, uses temporary directories with auto-cleanup.",
     )
 
+    script_dir = Path(__file__).parent.parent.absolute()
+    default_driver = (
+        script_dir / "build" / "bin" / "benchmarks" / "fusilli_benchmark_driver"
+    )
     parser.add_argument(
         "--driver",
+        "-D",
         type=str,
-        required=True,
-        help="Path to fusilli_benchmark_driver binary",
+        default=str(default_driver),
+        help=f"Path to fusilli_benchmark_driver binary (default: {default_driver})",
     )
 
     parser.add_argument(
         "--rocprof-args",
+        "-r",
         type=str,
         default="--runtime-trace",
         help="Arguments for rocprofv3 (default: --runtime-trace)",
@@ -203,12 +241,14 @@ The script will:
 
     parser.add_argument(
         "--verbose",
+        "-v",
         action="store_true",
         help="Print detailed output",
     )
 
     parser.add_argument(
         "--continue-on-error",
+        "-C",
         action="store_true",
         help="Continue running even if a command fails",
     )
@@ -258,7 +298,12 @@ def main():
         print(f"Results will be written to: {args.csv}\n")
 
     csv_file = csv.writer(open(args.csv, "w", newline=""))
-    csv_headers = ["command"] + [f"{stat} (us)" for stat in ALL_STATS]
+    csv_headers = ["command"]
+    for stat in ALL_STATS:
+        if stat == "count":
+            csv_headers.append(stat)
+        else:
+            csv_headers.append(f"{stat} (us)")
     csv_file.writerow(csv_headers)
 
     cmd_count = 0
