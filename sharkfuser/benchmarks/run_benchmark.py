@@ -43,7 +43,17 @@ def parse_rocprof_csv(output_dir: Path, iter_count: int) -> TimingStats:
                 reader = csv.DictReader(f)
                 # Each row represents a single kernel dispatch
                 for row in reader:
-                    if "Start_Timestamp" in row and "End_Timestamp" in row:
+                    # Sometimes, we may see non-async_dispatch rows in the CSV file.
+                    # It is not consistently reproducible, so we have this check
+                    # to filter out non-async_dispatch rows.
+                    has_async_dispatch = any(
+                        "async_dispatch" in str(value).lower() for value in row.values()
+                    )
+                    if (
+                        has_async_dispatch
+                        and "Start_Timestamp" in row
+                        and "End_Timestamp" in row
+                    ):
                         start = float(row["Start_Timestamp"])
                         end = float(row["End_Timestamp"])
                         # Convert from nanoseconds to microseconds
@@ -83,7 +93,7 @@ def parse_rocprof_csv(output_dir: Path, iter_count: int) -> TimingStats:
         count = len(iteration_durations)
     else:
         raise RuntimeError(
-            f">>> DEBUG: Invalid iter_count: {iter_count} or total_dispatches: {total_dispatches} < iter_count."
+            f">>> ERROR: Invalid iter_count: {iter_count} or total_dispatches: {total_dispatches} < iter_count."
         )
 
     return TimingStats(
