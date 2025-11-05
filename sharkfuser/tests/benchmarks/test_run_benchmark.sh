@@ -26,8 +26,8 @@ if [ "${NUM_ROWS}" -ne "${EXPECTED_ROWS}" ]; then
   exit 1
 fi
 # Using --iter 10, check column exists and has value 10
-if ! grep -q "count (us)" "${OUTPUT_CSV}"; then
-  echo "ERROR: 'count (us)' column not found in CSV"
+if ! grep -q "count" "${OUTPUT_CSV}"; then
+  echo "ERROR: 'count' column not found in CSV"
   exit 1
 fi
 # Verify at least one row has count=10
