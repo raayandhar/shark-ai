@@ -23,10 +23,16 @@ class TimingStats(NamedTuple):
     max: float | str = "N.A."
     mean: float | str = "N.A."
     stddev: float | str = "N.A."
-    count: int | str = "N.A."
+    iter: int | str = "N.A."
+    dispatch_count: int | str = "N.A."
 
 
-ALL_STATS = ["min", "max", "mean", "stddev", "count"]
+class CommandResult(NamedTuple):
+    stats: TimingStats
+    timed_out: bool = False
+
+
+ALL_STATS = ["min", "max", "mean", "stddev", "iter", "dispatch_count"]
 
 
 def parse_rocprof_csv(output_dir: Path, iter_count: int) -> TimingStats:
@@ -72,6 +78,9 @@ def parse_rocprof_csv(output_dir: Path, iter_count: int) -> TimingStats:
     total_dispatches = len(durations)
 
     if iter_count > 0 and total_dispatches >= iter_count:
+        assert (
+            total_dispatches % iter_count == 0
+        ), "Total dispatches must be divisible by iter_count"
         dispatches_per_iter = total_dispatches // iter_count
         # Group consecutive dispatches into iterations and sum their durations
         iteration_durations = []
@@ -90,14 +99,20 @@ def parse_rocprof_csv(output_dir: Path, iter_count: int) -> TimingStats:
             if len(iteration_durations) > 1
             else 0.0
         )
-        count = len(iteration_durations)
+        iter_count_result = len(iteration_durations)
+        dispatch_count = dispatches_per_iter
     else:
         raise RuntimeError(
             f">>> ERROR: Invalid iter_count: {iter_count} or total_dispatches: {total_dispatches} < iter_count."
         )
 
     return TimingStats(
-        min=min_time, max=max_time, mean=mean_time, stddev=stddev, count=count
+        min=min_time,
+        max=max_time,
+        mean=mean_time,
+        stddev=stddev,
+        iter=iter_count_result,
+        dispatch_count=dispatch_count,
     )
 
 
@@ -109,13 +124,14 @@ def run_profiled_command(
     verbose: bool,
     cmd_num: int,
     use_tempdir: bool,
-) -> TimingStats:
+    timeout: int,
+) -> CommandResult:
 
     driver_args = command.split()
     if not driver_args:
         if verbose:
             print(f">>> Failed to parse command: {command}")
-        return TimingStats()
+        return CommandResult(TimingStats())
 
     iter_count = 1
     if "--iter" in driver_args:
@@ -151,11 +167,13 @@ def run_profiled_command(
         if verbose:
             print(f">>> {shlex.join(rocprof_cmd)}\n")
 
+        timeout_val = None if timeout == -1 else timeout
         result = subprocess.run(
             rocprof_cmd,
             check=True,
             capture_output=True,
             text=True,
+            timeout=timeout_val,
         )
 
         if verbose and result.stdout:
@@ -165,21 +183,25 @@ def run_profiled_command(
 
         if verbose:
             print(
-                f">>> Stats: min={stats.min}, max={stats.max}, mean={stats.mean}, count={stats.count}"
+                f">>> Stats: min={stats.min}, max={stats.max}, mean={stats.mean}, iter={stats.iter}, dispatch_count={stats.dispatch_count}"
             )
 
-        return stats
+        return CommandResult(stats)
 
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print(f">>> Command timed out after {timeout} seconds")
+        return CommandResult(TimingStats(), timed_out=True)
     except subprocess.CalledProcessError as e:
         if verbose:
             print(f">>> Command failed with exit code {e.returncode}")
             if e.stderr:
                 print(f">>> stderr: {e.stderr}")
-        return TimingStats()
+        return CommandResult(TimingStats())
     except Exception as e:
         if verbose:
             print(f">>> Exception: {e}")
-        return TimingStats()
+        return CommandResult(TimingStats())
     finally:
         # Cleanup temporary directory if used
         if tmpdir_context is not None:
@@ -197,10 +219,14 @@ rocprofv3, and timing statistics are collected and written to a CSV file.
 Command format example:
   conv --bf16 -n 16 -c 64 -H 48 -W 32 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 --in_layout NHWC --out_layout NHWC --fil_layout NHWC --spatial_dim 2
 
+Commands starting with [SKIP] will be skipped:
+  [SKIP] conv --bf16 -n 128 -c 384 -H 24 -W 48 -k 384 -y 1 -x 3 ...
+
 The script will:
-  1. Run each command under rocprofv3
-  2. Extract timing statistics from rocprof CSV outputs
-  3. Aggregate results into a single output CSV
+  1. Run each command under rocprofv3 (or skip if prefixed with [SKIP])
+  2. Apply timeout to each command (default: 60 seconds)
+  3. Extract timing statistics from rocprof CSV outputs
+  4. Aggregate results into a single output CSV
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -257,6 +283,14 @@ The script will:
     )
 
     parser.add_argument(
+        "--timeout",
+        "-t",
+        type=int,
+        default=60,
+        help="Timeout in seconds for each command (default: 60, use -1 for no timeout)",
+    )
+
+    parser.add_argument(
         "--continue-on-error",
         "-C",
         action="store_true",
@@ -305,12 +339,14 @@ def main():
             print(f"Using temporary directories (auto-cleanup)")
         else:
             print(f"Output directory: {output_dir.absolute()}")
+        timeout_str = "no timeout" if args.timeout == -1 else f"{args.timeout} seconds"
+        print(f"Timeout: {timeout_str}")
         print(f"Results will be written to: {args.csv}\n")
 
     csv_file = csv.writer(open(args.csv, "w", newline=""))
     csv_headers = ["command"]
     for stat in ALL_STATS:
-        if stat == "count":
+        if stat in ["iter", "dispatch_count"]:
             csv_headers.append(stat)
         else:
             csv_headers.append(f"{stat} (us)")
@@ -319,9 +355,27 @@ def main():
     cmd_count = 0
     success_count = 0
     failed_count = 0
+    skipped_count = 0
+    timeout_count = 0
 
     for command in commands:
         cmd_count += 1
+
+        # Check if command should be skipped
+        skip_prefix = "[SKIP]"
+        is_skipped = command.startswith(skip_prefix)
+
+        if is_skipped:
+            display_command = command[len(skip_prefix) :].strip()
+            if args.verbose:
+                print(f"\n{'='*80}")
+                print(f"Skipped command {cmd_count}/{len(commands)}: {display_command}")
+                print(f"{'='*80}")
+            else:
+                print(f"Skipped command {cmd_count}/{len(commands)}")
+
+            skipped_count += 1
+            continue
 
         if args.verbose:
             print(f"\n{'='*80}")
@@ -330,7 +384,7 @@ def main():
         else:
             print(f"Running command {cmd_count}/{len(commands)}")
 
-        stats = run_profiled_command(
+        result = run_profiled_command(
             command,
             args.driver,
             output_dir,
@@ -338,8 +392,16 @@ def main():
             args.verbose,
             cmd_count,
             use_tempdir,
+            args.timeout,
         )
 
+        if result.timed_out and not args.verbose:
+            timeout_str = (
+                "no timeout" if args.timeout == -1 else f"{args.timeout} seconds"
+            )
+            print(f"  -> Timed out (timeout: {timeout_str})")
+
+        stats = result.stats
         csv_row = [command]
         for stat in ALL_STATS:
             value = getattr(stats, stat)
@@ -349,7 +411,10 @@ def main():
         if isinstance(stats.mean, float):
             success_count += 1
         else:
-            failed_count += 1
+            if result.timed_out:
+                timeout_count += 1
+            else:
+                failed_count += 1
             if not args.continue_on_error:
                 print("\nStopping due to error. Use --continue-on-error to continue.")
                 break
@@ -360,12 +425,14 @@ def main():
     print(f"Total commands: {cmd_count}")
     print(f"Successful: {success_count}")
     print(f"Failed: {failed_count}")
+    print(f"Timed out: {timeout_count}")
+    print(f"Skipped: {skipped_count}")
     print(f"Results CSV: {args.csv}")
     if not use_tempdir:
         print(f"Rocprof outputs: {output_dir.absolute()}")
     print(f"{'='*80}\n")
 
-    return 0 if failed_count == 0 else 1
+    return 0 if (failed_count == 0 and timeout_count == 0) else 1
 
 
 if __name__ == "__main__":

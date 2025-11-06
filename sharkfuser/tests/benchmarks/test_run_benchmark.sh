@@ -26,13 +26,18 @@ if [ "${NUM_ROWS}" -ne "${EXPECTED_ROWS}" ]; then
   exit 1
 fi
 # Using --iter 10, check column exists and has value 10
-if ! grep -q "count" "${OUTPUT_CSV}"; then
-  echo "ERROR: 'count' column not found in CSV"
+if ! grep -q "iter" "${OUTPUT_CSV}"; then
+  echo "ERROR: 'iter' column not found in CSV"
   exit 1
 fi
-# Verify at least one row has count=10
+# Check that dispatch_count column exists
+if ! grep -q "dispatch_count" "${OUTPUT_CSV}"; then
+  echo "ERROR: 'dispatch_count' column not found in CSV"
+  exit 1
+fi
+# Verify at least one row has iter=10
 if ! tail -n +2 "${OUTPUT_CSV}" | cut -d',' -f6 | grep -q "10"; then
-  echo "ERROR: Expected count=10 not found"
+  echo "ERROR: Expected iter=10 not found"
   exit 1
 fi
 
